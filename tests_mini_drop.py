@@ -43,7 +43,7 @@ def _probe():
         os.makedirs(d, exist_ok=True)
 
     out = {}
-    from PySide6.QtCore import QMimeData, QPoint, Qt, QUrl
+    from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt, QUrl
     from PySide6.QtGui import QDragEnterEvent, QDropEvent
     from PySide6.QtWidgets import QApplication
 
@@ -173,7 +173,97 @@ def _probe():
     except Exception:                 # noqa: BLE001
         pass
 
+    # ---------------------------------------------- 主面板 → 小窗口（内部 MIME 路线）
+    # 主面板 startDrag 发出去的就是这个载荷：DRAG_MIME + setUrls。
+    # 之前 MiniGrid 只看 MIME 就当换位，于是 on_drop_calls=0、minis.json 一条没进。
+    board_paths = []
+    for r in (w.desktop_rows or []):
+        if os.path.isfile(r.path) and norm(r.path) not in {norm(p) for p in ext_paths}                 and norm(r.path) not in want:
+            board_paths.append(r.path)
+    board_paths = board_paths[:1]
+    out["board_candidates"] = board_paths
+
+    minis_before = []
+    try:
+        with open(os.environ["DESKBOX_MINIS_JSON"], "r", encoding="utf-8") as fh:
+            for win in (json.load(fh) or {}).get("windows") or []:
+                if win.get("id") == m.wid:
+                    minis_before = list(win.get("paths") or [])
+    except Exception as exc:          # noqa: BLE001
+        out["minis_before_error"] = "%s: %s" % (type(exc).__name__, exc)
+
+    on_drop, reordered = [], []
+    m.grid.dropped_paths.connect(lambda ps: on_drop.append(list(ps)))
+    m.grid.reordered.connect(lambda ps, t: reordered.append((list(ps), t)))
+    if board_paths:
+        md = QMimeData()
+        md.setData(U.DRAG_MIME, ("\n".join(board_paths)).encode("utf-8"))
+        try:
+            md.setUrls([QUrl.fromLocalFile(p) for p in board_paths])
+        except Exception:             # noqa: BLE001
+            pass
+        pos = QPoint(12, 12)
+        m.grid.dragEnterEvent(QDragEnterEvent(pos, Qt.MoveAction, md,
+                                             Qt.LeftButton, Qt.NoModifier))
+        m.grid.dropEvent(QDropEvent(pos, Qt.MoveAction, md,
+                                    Qt.LeftButton, Qt.NoModifier))
+        app.processEvents()
+        m._reload()
+        app.processEvents()
+    out["board_on_drop_calls"] = len(on_drop)
+    out["board_reordered_calls"] = len(reordered)
+
+    minis_after = []
+    try:
+        with open(os.environ["DESKBOX_MINIS_JSON"], "r", encoding="utf-8") as fh:
+            for win in (json.load(fh) or {}).get("windows") or []:
+                if win.get("id") == m.wid:
+                    minis_after = list(win.get("paths") or [])
+    except Exception as exc:          # noqa: BLE001
+        out["minis_after_error"] = "%s: %s" % (type(exc).__name__, exc)
+    out["board_minis_before_n"] = len(minis_before)
+    out["board_minis_after_n"] = len(minis_after)
+    out["board_minis_added"] = sorted(
+        {norm(p) for p in minis_after} - {norm(p) for p in minis_before})
+    out["board_target"] = sorted({norm(p) for p in board_paths})
+    out["board_in_grid"] = sorted(
+        norm(it["path"]) for it in _icons(m) if norm(it["path"]) in {norm(p) for p in board_paths})
+    out["groups_has_board"] = False
+    try:
+        with open(gp, "r", encoding="utf-8") as fh:
+            keys2 = {os.path.normcase(k) for k in ((json.load(fh) or {}).get("items") or {})}
+        out["groups_has_board"] = all(norm(p) in keys2 for p in board_paths)
+    except Exception:                 # noqa: BLE001
+        pass
+
+    # ---------------------------------------------- 小窗口内部换位（顺序变、集合不变）
+    own_before = [it["path"] for it in _icons(m)]
+    seq_before = [norm(p) for p in own_before]
+    swap_ok = False
+    seq_after = list(seq_before)
+    if len(own_before) >= 3:
+        order = [p for p in own_before]
+        tgt_item = m.grid.item(len(order) - 1)
+        md2 = QMimeData()
+        md2.setData(U.DRAG_MIME, order[0].encode("utf-8"))     # 只带自己的路径
+        rect = m.grid.visualItemRect(tgt_item)
+        pos2 = QPointF(rect.center())
+        m.grid.dropEvent(QDropEvent(pos2, Qt.MoveAction, md2,
+                                    Qt.LeftButton, Qt.NoModifier))
+        app.processEvents()
+        m._reload()
+        app.processEvents()
+        seq_after = [norm(it["path"]) for it in _icons(m)]
+        swap_ok = True
+    out["swap_attempted"] = swap_ok
+    out["swap_seq_before"] = seq_before
+    out["swap_seq_after"] = seq_after
+    out["swap_set_unchanged"] = set(seq_before) == set(seq_after)
+    out["swap_order_changed"] = seq_before != seq_after
+    out["swap_count_same"] = len(seq_before) == len(seq_after)
+
     # ---------------------------------------------------------- 从账本恢复
+    out["count_before_restore"] = m.grid.count()
     old_wid = m.wid
     try:
         w.hide()
@@ -278,10 +368,37 @@ class MiniDropTest(unittest.TestCase):
         for it in (self.d.get("icons_total") or []):
             self.assertIs(it["pixmap_null"], False, it)
 
+    def test_08_board_drag_into_mini_is_ingested(self):
+        """主面板 → 小窗口：带 DRAG_MIME 的载荷以前被误判成「小窗口内部换位」，
+        结果 on_drop 一次没调、minis.json 一条没进。现在必须按数据分流。"""
+        self.assertTrue(self.d.get("board_candidates"),
+                        "桌面上没找到可用文件，用例前提不成立")
+        self.assertEqual(self.d.get("board_reordered_calls"), 0,
+                         self.d.get("board_reordered_calls"))     # 不许再走换位分支
+        self.assertEqual(self.d.get("board_on_drop_calls"), 1,
+                         self.d.get("board_on_drop_calls"))       # 必须走「收进来」
+        self.assertEqual(self.d.get("board_minis_after_n"),
+                         (self.d.get("board_minis_before_n") or 0) + 1,
+                         self.d)
+        self.assertEqual(set(self.d.get("board_minis_added") or []),
+                         set(self.d.get("board_target") or []))
+        self.assertEqual(set(self.d.get("board_in_grid") or []),
+                         set(self.d.get("board_target") or []))
+        self.assertTrue(self.d.get("groups_has_board"), self.d)   # 主面板也同步看得见
+
+    def test_09_internal_swap_keeps_ledger_set(self):
+        """小窗口内部互拖：顺序要变，但账本集合与条数一个都不许多。"""
+        self.assertTrue(self.d.get("swap_attempted"), self.d)
+        self.assertTrue(self.d.get("swap_order_changed"), self.d.get("swap_seq_after"))
+        self.assertEqual(self.d.get("swap_seq_before"), self.d.get("swap_seq_before"))
+        self.assertTrue(self.d.get("swap_set_unchanged"), self.d)
+        self.assertTrue(self.d.get("swap_count_same"), self.d)
+
     def test_07_restore_from_ledger_keeps_icons(self):
         self.assertTrue(self.d.get("restored_mini"), self.d.get("restore_error"))
         icons = self.d.get("icons_restored") or []
-        self.assertEqual(len(icons), self.d.get("grid_count_total"), icons)
+        # 用「重建前那一刻的条数」比：grid_count_total 记在主面板那次拖入之前
+        self.assertEqual(len(icons), self.d.get("count_before_restore"), icons)
         for it in icons:
             self.assertFalse(it["decoration_none"], it)
             self.assertIs(it["pixmap_null"], False, it)

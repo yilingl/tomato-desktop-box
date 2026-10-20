@@ -26,7 +26,7 @@ sys.path.insert(0, REPO)
 
 PROBE_FLAG = "--probe"
 PROBE_PREFIX = "TRAY_PROBE_JSON "
-LABELS = ["显示主面板", "显示全部小窗口", "任务栏透明", "设置", "退出"]
+LABELS = ["显示主面板", "显示全部小窗口", "隐藏全部小窗口", "任务栏透明", "设置", "退出"]
 TB_LABELS = ["磨砂", "透明", "关"]
 TB_MODES = ["blur", "clear", "off"]
 ISOLATED_ENV = ("DESKBOX_UI_JSON", "DESKBOX_GROUPS_JSON", "DESKBOX_CATS_JSON",
@@ -85,7 +85,8 @@ def _probe():
     # 本模块不许把 taskbarfx 拖进来（真改任务栏的活归它，测试也就不会碰到系统任务栏）
     out["taskbarfx_imported"] = "deskbox.taskbarfx" in sys.modules
 
-    calls = {"toggle": 0, "show_panel": 0, "minis": 0, "settings": 0, "quit": 0}
+    calls = {"toggle": 0, "show_panel": 0, "minis": 0, "hide_minis": 0,
+             "settings": 0, "quit": 0}
     tb_calls = []
     tb_seen = []
 
@@ -106,7 +107,7 @@ def _probe():
         # 谁把顺序改了这里立刻炸（这也是断言的一部分）；on_tb_mode 用关键字传
         t = tray_mod.Tray(None, _mkicon((16, 32)), cb("toggle"), cb("show_panel"),
                           cb("minis"), cb("settings"), cb("quit"),
-                          on_tb_mode=on_tb)
+                          on_tb_mode=on_tb, on_hide_all_minis=cb("hide_minis"))
     except Exception as exc:           # noqa: BLE001
         out["construct_error"] = "%s: %s" % (type(exc).__name__, exc)
         print(PROBE_PREFIX + json.dumps(out, ensure_ascii=False))
@@ -118,15 +119,15 @@ def _probe():
     acts = t.menu.actions()
     out["menu_labels"] = [a.text() for a in acts]
     out["menu_is_ours"] = t.contextMenu() is t.menu
-    sub = acts[2].menu() if len(acts) > 2 else None
-    out["has_submenu_at_2"] = sub is not None
-    out["menu3_text"] = acts[2].text() if len(acts) > 2 else None
+    sub = acts[3].menu() if len(acts) > 3 else None
+    out["has_submenu_at_3"] = sub is not None
+    out["menu_tb_text"] = acts[3].text() if len(acts) > 3 else None
     out["submenu_title"] = sub.title() if sub is not None else None
     out["submenu_labels"] = [a.text() for a in sub.actions()] if sub is not None else None
     out["default_checked"] = _checked(sub) if sub is not None else None
     gc.collect()                       # 菜单被 GC 掉的话文案就没了
     out["menu_labels_after_gc"] = [a.text() for a in t.menu.actions()]
-    sub2 = t.menu.actions()[2].menu()
+    sub2 = t.menu.actions()[3].menu()
     out["submenu_labels_after_gc"] = [a.text() for a in sub2.actions()] if sub2 is not None else None
     out["default_checked_after_gc"] = _checked(sub2) if sub2 is not None else None
 
@@ -169,32 +170,45 @@ def _probe():
 
         # 「任务栏透明」整项可禁用（将来 taskbarfx 缺失时用）
         out["set_tb_enabled_ret"] = bool(t.set_tb_enabled(False, "任务栏特效不可用"))
-        out["tb_action_enabled"] = bool(acts[2].isEnabled())
-        out["tb_action_tooltip"] = acts[2].toolTip()
+        out["tb_action_enabled"] = bool(acts[3].isEnabled())
+        out["tb_action_tooltip"] = acts[3].toolTip()
         t.set_tb_enabled(True, "")
-        out["tb_action_enabled_after"] = bool(acts[2].isEnabled())
+        out["tb_action_enabled_after"] = bool(acts[3].isEnabled())
 
-    # 顶层四项各自接线（计数先清零，方便看「各点一次是不是各正好一次」）
+    # 顶层各项各自接线（计数先清零，方便看「各点一次是不是各正好一次」）
     for k in calls:
         calls[k] = 0
     acts = t.menu.actions()
-    for idx in (0, 1, 3, 4):           # 2 是子菜单，不 trigger
+    for idx in (0, 1, 2, 4, 5):        # 3 是子菜单，不 trigger
         acts[idx].trigger()
     out["after_menu"] = dict(calls)
-    out["tb_calls_after_top4"] = list(tb_calls)
+    out["tb_calls_after_top"] = list(tb_calls)
+
+    # 「隐藏全部小窗口」单独再点一次：只许碰 on_hide_all_minis，其余五路计数全 0
+    for k in calls:
+        calls[k] = 0
+    acts[2].trigger()
+    out["hide_all_only"] = dict(calls)
 
     # tb_mode 传入的三种情况：合法值 / 非法值 / 不传
     out["variant_errors"] = []
     try:
         v = tray_mod.Tray(None, _mkicon((16, 32)), tb_mode="clear")
-        out["variant_clear"] = _checked(v.menu.actions()[2].menu())
+        out["variant_clear"] = _checked(v.menu.actions()[3].menu())
         v2 = tray_mod.Tray(None, _mkicon((16, 32)), tb_mode="bogus")
-        out["variant_bogus"] = _checked(v2.menu.actions()[2].menu())
+        out["variant_bogus"] = _checked(v2.menu.actions()[3].menu())
         v3 = tray_mod.Tray(None, _mkicon((16, 32)))
-        out["variant_none"] = _checked(v3.menu.actions()[2].menu())
+        out["variant_none"] = _checked(v3.menu.actions()[3].menu())
+        # 原七个位置参数 + tb_mode 关键字：on_hide_all_minis 追加在末尾，这里不许错位
         v4 = tray_mod.Tray(None, _mkicon((16, 32)), None, None, None, None, None,
                            None, "blur")
-        out["variant_kwarg_only"] = _checked(v4.menu.actions()[2].menu())
+        out["variant_kwarg_only"] = _checked(v4.menu.actions()[3].menu())
+        # 再加一个：五路位置参数 + on_hide_all_minis 关键字，点第三项要落到它身上
+        hid = []
+        v6 = tray_mod.Tray(None, _mkicon((16, 32)), None, None, None, None, None,
+                           on_hide_all_minis=lambda: hid.append(1))
+        v6.menu.actions()[2].trigger()
+        out["variant_hide_kwarg"] = len(hid)
     except Exception as exc:           # noqa: BLE001
         out["variant_errors"].append("%s: %s" % (type(exc).__name__, exc))
 
@@ -241,10 +255,11 @@ def _probe():
     out["bad_cb_error"] = ""
     try:
         t2 = tray_mod.Tray(None, _mkicon((16, 32)), boom, boom, boom, boom, boom,
-                           on_tb_mode=boom)
+                           on_tb_mode=boom, on_hide_all_minis=boom)
         t2.activated.emit(QSystemTrayIcon.ActivationReason.Trigger)
-        t2.menu.actions()[4].trigger()
-        t2.menu.actions()[2].menu().actions()[0].trigger()
+        t2.menu.actions()[2].trigger()                      # 隐藏全部小窗口 也炸
+        t2.menu.actions()[5].trigger()                      # 退出
+        t2.menu.actions()[3].menu().actions()[0].trigger()  # 任务栏透明第一档
     except Exception as exc:           # noqa: BLE001
         out["bad_cb_error"] = "%s: %s" % (type(exc).__name__, exc)
 
@@ -332,9 +347,10 @@ class TrayTest(unittest.TestCase):
 
     def test_04_tb_submenu_shape(self):
         d = self.data
-        self.check("menu.actions()[2] 是子菜单", d.get("has_submenu_at_2") is True,
-                   d.get("has_submenu_at_2"))
-        self.check("子菜单项文案 == 任务栏透明", d.get("menu3_text") == "任务栏透明", d.get("menu3_text"))
+        self.check("menu.actions()[3] 是子菜单", d.get("has_submenu_at_3") is True,
+                   d.get("has_submenu_at_3"))
+        self.check("子菜单项文案 == 任务栏透明", d.get("menu_tb_text") == "任务栏透明",
+                   d.get("menu_tb_text"))
         self.check("子菜单标题 == 任务栏透明", d.get("submenu_title") == d.get("const_tb_title") == "任务栏透明",
                    (d.get("submenu_title"), d.get("const_tb_title")))
         self.check("三档文案与顺序 == %s" % TB_LABELS, d.get("submenu_labels") == TB_LABELS,
@@ -373,12 +389,13 @@ class TrayTest(unittest.TestCase):
 
     def test_07_tb_items_do_not_touch_other_callbacks(self):
         d = self.data
-        zero = {"toggle": 0, "show_panel": 0, "minis": 0, "settings": 0, "quit": 0}
-        self.check("点三档期间四项回调计数全 0", d.get("calls_during_tb") == [zero, zero, zero],
+        zero = {"toggle": 0, "show_panel": 0, "minis": 0, "hide_minis": 0,
+                "settings": 0, "quit": 0}
+        self.check("点三档期间其余五路回调计数全 0", d.get("calls_during_tb") == [zero, zero, zero],
                    d.get("calls_during_tb"))
-        self.check("点顶层四项不会误触 on_tb_mode",
-                   d.get("tb_calls_after_top4") == ["blur", "clear", "off", "off"],
-                   d.get("tb_calls_after_top4"))
+        self.check("点顶层五项不会误触 on_tb_mode",
+                   d.get("tb_calls_after_top") == ["blur", "clear", "off", "off"],
+                   d.get("tb_calls_after_top"))
 
     def test_08_set_tb_mode(self):
         d = self.data
@@ -412,7 +429,7 @@ class TrayTest(unittest.TestCase):
                    d.get("tb_action_enabled_after"))
 
     def test_10_menu_items_wired_to_callbacks(self):
-        """顶层四项各接各的回调：第 1 项是「只显不隐」的 on_show_panel，不是切换。"""
+        """顶层五项各接各的回调：第 1 项是「只显不隐」的 on_show_panel，不是切换。"""
         d = self.data
         c = d.get("after_menu") or {}
         self.check("显示主面板 -> on_show_panel 恰好 1 次", c.get("show_panel") == 1, c)
@@ -420,6 +437,20 @@ class TrayTest(unittest.TestCase):
         self.check("显示全部小窗口 -> on_show_all_minis", c.get("minis") == 1, c.get("minis"))
         self.check("设置 -> on_settings", c.get("settings") == 1, c.get("settings"))
         self.check("退出 -> on_quit", c.get("quit") == 1, c.get("quit"))
+
+    def test_10b_hide_all_minis_wired(self):
+        """第六项（第 3 位）「隐藏全部小窗口」：点一次恰好回调一次，且不碰其余五路。"""
+        d = self.data
+        c = d.get("hide_all_only") or {}
+        self.check("点「隐藏全部小窗口」-> on_hide_all_minis 恰好 1 次",
+                   c.get("hide_minis") == 1, c)
+        self.check("点「隐藏全部小窗口」不碰 on_show_panel", c.get("show_panel") == 0, c)
+        self.check("点「隐藏全部小窗口」不碰 on_show_all_minis", c.get("minis") == 0, c)
+        self.check("点「隐藏全部小窗口」不碰 on_toggle_panel", c.get("toggle") == 0, c)
+        self.check("点「隐藏全部小窗口」不碰 on_settings", c.get("settings") == 0, c)
+        self.check("点「隐藏全部小窗口」不碰 on_quit", c.get("quit") == 0, c)
+        self.check("传 on_hide_all_minis 关键字时第三项落到它身上",
+                   d.get("variant_hide_kwarg") == 1, d.get("variant_hide_kwarg"))
 
     # ------------------------------------------------------------ 传参
     def test_11_tb_mode_kwarg_variants(self):
@@ -480,7 +511,7 @@ class TrayTest(unittest.TestCase):
 
     def test_17_broken_callback_does_not_break_tray(self):
         d = self.data
-        self.check("回调抛异常不影响托盘（含 on_tb_mode）",
+        self.check("回调抛异常不影响托盘（含 on_tb_mode / on_hide_all_minis）",
                    d.get("bad_cb_error") == "", d.get("bad_cb_error"))
 
 

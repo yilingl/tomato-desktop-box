@@ -67,6 +67,7 @@ AUTO, _AUTO_ERR = _rel("autostart")    # 开机自启动（HKCU 的 Run 键）
 TRAY, _TRAY_ERR = _rel("tray")         # 系统托盘图标（通知区）
 APPICON, _APPICON_ERR = _rel("appicon")   # 程序图标（窗口 / 托盘，自带降级画法）
 TBFX, _TBFX_ERR = _rel("taskbarfx")    # 任务栏透明（纯 ctypes，缺失则整行降级）
+SINGLE, _SINGLE_ERR = _rel("single")   # 单实例守卫（QLocalServer）；缺失则安静降级成单开
 
 ACCENT = QColor("#0A84FF")
 FAMILY = "Microsoft YaHei UI"
@@ -76,7 +77,7 @@ RADIUS = 16
 # 五处（背景 / 开机自启动 / 最小化到托盘 / 点关闭 / 小窗口自动粘连）都引用这两个常量。
 _CHIP_W = 89
 _CHIP_H = 30
-VERSION = "2.2.0"
+VERSION = "2.2.1"
 # 截图 / 自动化时压制启动自检弹窗（--shot 会自动打开）
 NO_HIDE_PROMPT = False
 
@@ -122,6 +123,23 @@ def _release_tb():
     if TBFX is None:
         return
     fn = getattr(TBFX, "release", None)
+    if not callable(fn):
+        return
+    try:
+        fn()
+    except Exception:                  # noqa: BLE001 —— 退出路径上绝不能抛
+        pass
+
+
+def _release_single():
+    """程序退出时放掉单实例的管道名。挂在 aboutToQuit 上，跟 _release_tb 并列。
+
+    管道本来也会被系统回收（进程消失就没了），这条只是让下次启动少一次残留清理；
+    退出路径上绝不能抛，所以整个包在 try 里。
+    """
+    if SINGLE is None:
+        return
+    fn = getattr(SINGLE, "release", None)
     if not callable(fn):
         return
     try:
@@ -1288,20 +1306,39 @@ class MiniGrid(DropGrid):
         else:
             e.ignore()
 
+    def _own_paths(self):
+        """本窗口当前自己的条目集合（normcase 形态，跟 minis.json 比较同一套规则）。
+
+        MiniGrid 的 parent 才是 MiniWindow，所以这里直接找 wid 自己查账本，
+        不依赖 MiniWindow 上的私有方法。
+        """
+        wid = getattr(self.parent(), "wid", None)
+        if not wid or MB is None:
+            return set()
+        try:
+            d = MB.get(wid) or {}
+        except Exception:              # noqa: BLE001
+            return set()
+        return {_nk(p) for p in (d.get("paths") or []) if p}
+
     def dropEvent(self, e):
         self._set_hot(False)
         paths = _paths_from_mime(e.mimeData())
         if not paths:
             e.ignore()
             return
-        if _is_internal(e.mimeData()):
-            # 小窗口内部互相拖 = 换位；外部拖进来的文件仍然是「收进来」。
+        # 按「数据是不是我自己的」分流，而不是按「谁发的」分流：
+        # 主面板 / 别的小窗口拖过来的也带 DRAG_MIME，只看 MIME 会把它们误判成换位，
+        # 于是文件根本进不了 minis.json（2.1.0 就有的老 bug）。
+        if {_nk(p) for p in paths} <= self._own_paths():
+            # 全是我已有的条目 → 内部换位，只改次序，账本一个字不动。
             it = self.itemAt(e.position().toPoint())
             target = it.data(Qt.UserRole) if it is not None else None
             e.setDropAction(Qt.MoveAction)
             e.accept()
             self.reordered.emit(paths, target)
             return
+        # 有任意一条不是我这里的东西 → 跟外部拖入走同一条「收进来」的路。
         e.acceptProposedAction()
         self.dropped = paths
         self.dropped_paths.emit(paths)
@@ -2402,6 +2439,10 @@ class MainWindow(QWidget):
         self._minis = {}                   # wid -> MiniWindow，别让它们被 GC 掉
         self._mini_tip = ""                # 小窗口工具提示缓存
         self._hidden_minis = []            # 随主面板一起收起来的小窗口 wid
+        # 托盘「隐藏全部小窗口」回收的 wid，跟主面板收起那套（_hidden_minis）分开记：
+        # 混在一起的话，用户点完「隐藏全部小窗口」再随手把主面板收起来放出来，
+        # showEvent -> _resume_minis 就把刚收好的窗口全弹回来，回收等于白做。
+        self._recycled_minis = []
         self._tray = None                  # 系统托盘（main() 里 _setup_tray() 建，必须留引用）
         self._shown_once = False           # showEvent 第一次不算「主面板重新打开」
         self._ready = False
@@ -2633,7 +2674,8 @@ class MainWindow(QWidget):
                 on_settings=self._on_settings,
                 on_quit=self._tray_quit,
                 on_tb_mode=self._on_tb_from_tray,   # 托盘里点了某一档
-                tb_mode=getattr(self, "_tb_mode", TB_DEFAULT))
+                tb_mode=getattr(self, "_tb_mode", TB_DEFAULT),
+                on_hide_all_minis=self._tray_hide_minis)
         except Exception:              # noqa: BLE001 —— 模块在但起不来
             self._tray = None
             return None
@@ -2678,8 +2720,14 @@ class MainWindow(QWidget):
             pass
 
     def _tray_show_minis(self):
-        """托盘菜单「显示全部小窗口」：登记过的小窗口全露出来。"""
+        """托盘菜单「显示全部小窗口」：登记过的小窗口全露出来，被回收的也放出来。
+
+        主面板收起那套（_hidden_minis）由 _resume_minis() 管；托盘回收的那批
+        （_recycled_minis）只有这里能放出来 —— 主面板关了再开不该复活它们。
+        """
         self._resume_minis()           # 跟着主面板一起收起来的先开回来
+        recycled = list(getattr(self, "_recycled_minis", []) or [])
+        self._recycled_minis = []
         ids = []
         try:
             ids = list(MB.open_ids()) if MB is not None else []
@@ -2687,12 +2735,90 @@ class MainWindow(QWidget):
             ids = []
         if not ids:
             ids = list(getattr(self, "_minis", {}) or {})
+        ids = recycled + [w for w in ids if w not in recycled]   # 回收的排最前面
         for wid in ids[:12]:           # 别一口气开二十个（沿用 _restore_minis 的上限）
             try:
                 self._open_mini(wid)   # 已经开着就只抬起来
             except Exception:          # noqa: BLE001
                 pass
         self._sync_mini_btn()
+
+    def _tray_hide_minis(self):
+        """托盘菜单「隐藏全部小窗口」：把**当前露着**的小窗口全收起来。
+
+        跟主面板 closeEvent 收小窗口那段是同一条规矩：只 hide()、**绝不 close()**。
+        close() 会走 MiniWindow.closeEvent 往 minis.json 写 open=False，那样下次
+        「显示全部小窗口」就再也开不回来了 —— 这里一个字节都不许写账本。
+
+        wid 记进 _recycled_minis，**不碰 _hidden_minis**：后者是「主面板关→开」那套
+        （showEvent -> _resume_minis）用的。共用的话，用户点完「隐藏全部小窗口」再
+        随手把主面板收起来放出来，刚收好的窗口就全弹回来了，回收等于白做。
+        只有主动点「显示全部小窗口」才放出来（_tray_show_minis）。
+        """
+        recycled = list(getattr(self, "_recycled_minis", []) or [])
+        for m in list((getattr(self, "_minis", {}) or {}).values()):
+            if m is None or getattr(m, "_gone", False):
+                continue                   # 已经销毁的不碰
+            try:
+                if not m.isVisible():
+                    continue               # 本来就藏着的，不重复记
+            except Exception:              # noqa: BLE001
+                continue
+            wid = getattr(m, "wid", None)
+            try:
+                m.hide()                   # 只 hide：绝不给它 close()
+            except Exception:              # noqa: BLE001
+                continue
+            if wid is not None and wid not in recycled:
+                recycled.append(wid)
+        self._recycled_minis = recycled
+        self._sync_mini_btn()
+
+    def _on_second_launch(self, text):
+        """收到第二个实例的消息：默认把主面板叫到前面；"--quit" 则照常退出。
+
+        载荷来自另一个进程，格式不能指望 —— 任何异常都吞掉，绝不能让"第二次双击"
+        把正在跑的这个搞崩。text 里不含参数时就是纯叫醒。
+        """
+        lines = []
+        try:
+            lines = str(text or "").splitlines()
+        except Exception:              # noqa: BLE001
+            return
+        # 第一行是对方的 cwd，第二行起是它的 argv；纯叫醒时可能只有一行（或空）。
+        args = [ln.strip() for ln in lines[1:] if ln.strip()]
+        if "--quit" in args:
+            try:
+                self._tray_quit()      # 跟托盘「退出」同一套收尾，不另写一条退出路径
+            except Exception:          # noqa: BLE001
+                pass
+            return
+        try:
+            self._bring_to_front()
+        except Exception:              # noqa: BLE001
+            pass
+
+    def _bring_to_front(self):
+        """把主面板叫到前面：藏着/收进托盘/最小化 的先 show()，再 raise + 激活。
+
+        show() 会触发 showEvent → _resume_minis()（既有行为，保持不动）：
+        被收进托盘时 _hidden_minis 是空的，所以不会多开小窗口。
+        """
+        try:
+            if not self.isVisible() or self.isMinimized():
+                self.show()
+            if self.isMinimized():
+                self.showNormal()
+        except Exception:              # noqa: BLE001
+            pass
+        try:
+            self.raise_()
+        except Exception:              # noqa: BLE001
+            pass
+        try:
+            self.activateWindow()
+        except Exception:              # noqa: BLE001
+            pass
 
     def _tray_quit(self):
         """托盘菜单「退出」：真的退出程序。
@@ -2735,11 +2861,14 @@ class MainWindow(QWidget):
         if not ok:
             self._mini_tip = "数据层未就绪"
         else:
+            # 数**真露着的**，不数账本里的 open 标记：托盘「隐藏全部小窗口」
+            # 和主面板收起小窗口都只 hide() 不写 open=False，账本里照样是
+            # open=True 一堆，拿 MB.open_ids() 会显示「开着 3 个」而屏幕上一个都没有。
             n = 0
             try:
-                n = len(MB.open_ids())
-            except Exception:          # noqa: BLE001
                 n = len(self._alive_minis())
+            except Exception:          # noqa: BLE001
+                n = 0
             self._mini_tip = "小窗口" + ("（开着 %d 个）" % n if n else "")
         btn.setToolTip(self._mini_tip)
         btn.set_dim(not ok)            # minibox 缺失时置灰
@@ -4872,13 +5001,26 @@ def main():
     # 托盘退出 / 关主面板 / app.quit() 三条路都会走到这里，只要漏一处就会
     # 在用户桌面上留一个没人负责的透明任务栏。
     app.aboutToQuit.connect(_release_tb)
+    # 退出时把单实例的管道名清掉（跟 _release_tb 并列挂，不覆盖它）。
+    # 管道本来也会被系统回收，这条只是为了下次启动少一次 removeServer 的残留清理。
+    app.aboutToQuit.connect(_release_single)
     app.setFont(QFont(FAMILY, 9))
     if APPICON is not None:
         try:
             app.setWindowIcon(APPICON.qicon())   # 缺失 / 损坏时 appicon 自带降级画法
         except Exception:              # noqa: BLE001
             pass
+    # 单实例：已经有一个在跑就把它叫到前面，自己直接收工。
+    # 放在 MainWindow() 之前 —— 第二个进程连窗口都不该建（建了就是两套小窗口）。
+    # single.py 缺失时 SINGLE 是 None：安静降级成"照常单开"，不让程序起不来。
+    if SINGLE is not None:
+        ok, _sock = SINGLE.acquire(sys.argv[1:])
+        if not ok:
+            sys.exit(0)
     w = MainWindow()
+    if SINGLE is not None:
+        # 服务端必须留长期引用，GC 掉就再也收不到第二实例的消息了。
+        _SRV = SINGLE.listen(w._on_second_launch)   # noqa: F841 —— 引用本身就是目的
     if "--bg" in sys.argv:                 # 自检：强制风格（frost|light）
         set_bg_mode(sys.argv[sys.argv.index("--bg") + 1])
         _apply_theme_all()

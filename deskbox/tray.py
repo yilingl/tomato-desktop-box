@@ -5,13 +5,14 @@
 
 用户已拍板的行为（不改）：
     - 左键单击托盘图标 = 显示 / 隐藏主面板  -> on_toggle_panel（切换）
-    - 右键菜单五项，顺序固定：
+    - 右键菜单六项，顺序固定：
         1 显示主面板      只显不隐 -> on_show_panel（面板已经露着时点它也不会把它藏起来）
         2 显示全部小窗口  -> on_show_all_minis
-        3 任务栏透明      子菜单，三档单选打勾（磨砂 / 透明 / 关）-> on_tb_mode(mode)
+        3 隐藏全部小窗口  把露着的小窗口全收起来（不是删除、不是关账）-> on_hide_all_minis
+        4 任务栏透明      子菜单，三档单选打勾（磨砂 / 透明 / 关）-> on_tb_mode(mode)
                           内存值 "blur" / "clear" / "off"，默认勾「关」
-        4 设置            -> on_settings
-        5 退出            -> on_quit（真退不退由调用方决定）
+        5 设置            -> on_settings
+        6 退出            -> on_quit（真退不退由调用方决定）
     - 图标 QIcon 由调用方传入（本模块不生成图标、不读图标文件）
 
 环境不可用时（离屏 QT_QPA_PLATFORM=offscreen / 无通知区的会话，
@@ -29,7 +30,7 @@ from PySide6.QtGui import QActionGroup
 from PySide6.QtWidgets import QSystemTrayIcon, QMenu
 
 TOOLTIP = "Tomato Desktop Box"
-MENU_LABELS = ("显示主面板", "显示全部小窗口", "任务栏透明", "设置", "退出")
+MENU_LABELS = ("显示主面板", "显示全部小窗口", "隐藏全部小窗口", "任务栏透明", "设置", "退出")
 TB_TITLE = "任务栏透明"
 TB_MODES = ("blur", "clear", "off")
 TB_LABELS = ("磨砂", "透明", "关")
@@ -45,7 +46,7 @@ class Tray(QSystemTrayIcon):
 
     def __init__(self, parent, icon, on_toggle_panel=None, on_show_panel=None,
                  on_show_all_minis=None, on_settings=None, on_quit=None,
-                 on_tb_mode=None, tb_mode=None):
+                 on_tb_mode=None, tb_mode=None, on_hide_all_minis=None):
         # 先立降级标志：万一底层对象没建成，后续一切调用都走空转分支，不炸。
         self._broken = True
         self.menu = None
@@ -64,7 +65,7 @@ class Tray(QSystemTrayIcon):
             self._tb_mode = _norm_tb_mode(tb_mode)
             self.setToolTip(TOOLTIP)
             self.menu = self._build_menu(on_show_panel, on_show_all_minis,
-                                         on_settings, on_quit)
+                                         on_settings, on_quit, on_hide_all_minis)
             self.setContextMenu(self.menu)   # self.menu 持引用，菜单不被 GC
             self.activated.connect(self._on_activated)
             self._broken = False
@@ -76,18 +77,21 @@ class Tray(QSystemTrayIcon):
             self._broken = True
 
     # ---------------------------------------------------------------- 生成
-    def _build_menu(self, on_show_panel, on_show_all_minis, on_settings, on_quit):
-        """五项，文案与顺序固定；QAction 由 menu 持有，menu 由 self.menu 持有。
+    def _build_menu(self, on_show_panel, on_show_all_minis, on_settings, on_quit,
+                    on_hide_all_minis):
+        """六项，文案与顺序固定；QAction 由 menu 持有，menu 由 self.menu 持有。
 
-        第 3 项「任务栏透明」是子菜单（_build_tb_menu 造），其余四项接各自的回调。
+        第 4 项「任务栏透明」是子菜单（_build_tb_menu 造），其余五项接各自的回调（共六项）。
+        回调按中文文案当 key 取，不用下标 —— 以后再往 MENU_LABELS 里插项也不会错位。
         「显示主面板」接的是 on_show_panel（只显不隐）；
         左键单击的显示 / 隐藏切换是另一条线（self._toggle），别接混。
         """
         menu = QMenu(self.parent())
-        fns = {MENU_LABELS[0]: on_show_panel,
-               MENU_LABELS[1]: on_show_all_minis,
-               MENU_LABELS[3]: on_settings,
-               MENU_LABELS[4]: on_quit}
+        fns = {"显示主面板": on_show_panel,
+               "显示全部小窗口": on_show_all_minis,
+               "隐藏全部小窗口": on_hide_all_minis,
+               "设置": on_settings,
+               "退出": on_quit}
         for text in MENU_LABELS:
             if text == TB_TITLE:
                 self._tb_menu = self._build_tb_menu(menu)

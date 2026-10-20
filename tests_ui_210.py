@@ -384,15 +384,18 @@ def _probe():
             outer = self
 
             class _Tray(object):
-                # 末两个参数是 2.2.0 加的「任务栏透明」子菜单接线（真 tray.py 同样追加在
-                # 末尾、都带默认值）；假对象必须跟着收，否则 MainWindow 构造就 TypeError。
+                # 后面几个参数都是追加在末尾、带默认值的（真 tray.py 同样如此）：
+                # on_tb_mode / tb_mode 是 2.2.0 的「任务栏透明」子菜单接线，
+                # on_hide_all_minis 是托盘菜单第 3 项「隐藏全部小窗口」。
+                # 假对象不跟着收，MainWindow 构造就会 TypeError。
                 def __init__(self, parent, icon, on_toggle_panel=None, on_show_panel=None,
                              on_show_all_minis=None, on_settings=None, on_quit=None,
-                             on_tb_mode=None, tb_mode=None):
+                             on_tb_mode=None, tb_mode=None, on_hide_all_minis=None):
                     outer.ctor = {"parent": parent, "icon": icon,
                                   "on_toggle_panel": on_toggle_panel,
                                   "on_show_panel": on_show_panel,
                                   "on_show_all_minis": on_show_all_minis,
+                                  "on_hide_all_minis": on_hide_all_minis,
                                   "on_settings": on_settings, "on_quit": on_quit,
                                   "on_tb_mode": on_tb_mode, "tb_mode": tb_mode}
                     self.shown = 0
@@ -435,6 +438,7 @@ def _probe():
         "settings": cb.get("on_settings") == w._on_settings,
         "quit": cb.get("on_quit") == w._tray_quit,
         "tb_mode": cb.get("on_tb_mode") == w._on_tb_from_tray,   # 2.2.0 新增
+        "hide_minis": cb.get("on_hide_all_minis") == w._tray_hide_minis,   # 菜单第 3 项
     }
     out["ctor_tb_mode"] = cb.get("tb_mode")
     out["panel_tb_mode"] = getattr(w, "_tb_mode", None)
@@ -815,6 +819,127 @@ def _probe():
     w._minis.clear()
     w._hidden_minis = []
 
+    # ------------------------------------------- 托盘「隐藏全部小窗口」（菜单第 3 项）
+    # 只 hide() 不 close()：屏幕上收起来，minis.json 里的 open 一个字都不许动。
+    # 回收的 wid 记进 _recycled_minis，跟主面板收起那套 _hidden_minis 分开：
+    # 主面板关了再开不该复活被回收的窗口，只有「显示全部小窗口」能放出来。
+    def _spawn_two():
+        """造两个小窗口并都露出来，返回 (wid1, wid2, 错误串)。"""
+        wids, err = [], ""
+        try:
+            for title in ("隐藏全部-A", "隐藏全部-B"):
+                _d = U.MB.create(title=title)
+                _wid = (_d or {}).get("id")
+                if _wid:
+                    wids.append(_wid)
+                    w._open_mini(_wid)
+        except Exception as exc:       # noqa: BLE001
+            err = "%s: %s" % (type(exc).__name__, exc)
+        return (wids[0] if len(wids) > 0 else None,
+                wids[1] if len(wids) > 1 else None, err)
+
+    def _drop_two(*wids):
+        for _wid in wids:
+            _m = w._minis.pop(_wid, None)
+            if _m is not None:
+                _m._user_closed = True
+                try:
+                    _m.close()
+                except Exception:      # noqa: BLE001
+                    pass
+        w._hidden_minis = []
+        w._recycled_minis = []
+
+    out["hm_error"] = ""
+    ha, hb, out["hm_spawn_error"] = _spawn_two()
+    out["hm_wids"] = [ha, hb]
+    out["hm_visible_before"] = [bool(x and x in w._minis and w._minis[x].isVisible())
+                                for x in (ha, hb)]
+    out["hm_open_before"] = [ledger_open(x) for x in (ha, hb)]
+    bytes_before_hm = minis_bytes()
+    try:
+        cb["on_hide_all_minis"]()          # 走托盘真正挂上来的那个回调
+        app.processEvents()
+    except Exception as exc:               # noqa: BLE001
+        out["hm_error"] = "%s: %s" % (type(exc).__name__, exc)
+    out["hm_visible_after"] = [bool(x and x in w._minis and w._minis[x].isVisible())
+                               for x in (ha, hb)]
+    out["hm_open_after"] = [ledger_open(x) for x in (ha, hb)]
+    out["hm_open_ids_has_a"] = ha in list(U.MB.open_ids()) if ha else None
+    out["hm_open_ids_has_b"] = hb in list(U.MB.open_ids()) if hb else None
+    out["hm_recycled_minis"] = [x for x in list(w._recycled_minis) if x in (ha, hb)]
+    out["hm_recycled_has_both"] = bool(ha and hb and ha in w._recycled_minis
+                                       and hb in w._recycled_minis)
+    # 关键：回收**不许**落进 _hidden_minis（那是主面板关→开那套的账）
+    out["hm_hidden_minis_stays_empty"] = (list(w._hidden_minis) == [])
+    out["hm_hidden_minis_after_hide"] = list(w._hidden_minis)
+    out["hm_ledger_bytes_same"] = minis_bytes() == bytes_before_hm
+    out["hm_tip_after_hide"] = getattr(w, "_mini_tip", None)
+
+    # 幂等：已经在藏着的再收一次，不许重复记、不许报错
+    out["hm_again_error"] = ""
+    try:
+        w._tray_hide_minis()
+        app.processEvents()
+    except Exception as exc:               # noqa: BLE001
+        out["hm_again_error"] = "%s: %s" % (type(exc).__name__, exc)
+    out["hm_recycled_after_twice"] = list(w._recycled_minis)
+    out["hm_recycled_count_after_twice"] = len([x for x in w._recycled_minis if x in (ha, hb)])
+    out["hm_recycled_no_dup"] = (len(set(w._recycled_minis)) == len(w._recycled_minis))
+    out["hm_visible_after_twice"] = [bool(x and x in w._minis and w._minis[x].isVisible())
+                                     for x in (ha, hb)]
+
+    # 主面板 hide() -> show()：被回收的窗口**不许**自己弹回来（这条钉住两套状态分开）
+    out["hm_reshow_error"] = ""
+    try:
+        w.hide()
+        app.processEvents()
+        w.show()
+        app.processEvents()
+    except Exception as exc:               # noqa: BLE001
+        out["hm_reshow_error"] = "%s: %s" % (type(exc).__name__, exc)
+    out["hm_visible_after_reshow"] = [bool(x and x in w._minis and w._minis[x].isVisible())
+                                      for x in (ha, hb)]
+    out["hm_recycled_after_reshow"] = [x for x in list(w._recycled_minis) if x in (ha, hb)]
+    out["hm_recycled_survives_reshow"] = bool(
+        ha and hb and ha in w._recycled_minis and hb in w._recycled_minis)
+    out["hm_hidden_after_reshow"] = list(w._hidden_minis)
+
+    # 「显示全部小窗口」把它们开回来，_recycled_minis 清空
+    out["hm_show_error"] = ""
+    try:
+        w._tray_show_minis()
+        app.processEvents()
+    except Exception as exc:               # noqa: BLE001
+        out["hm_show_error"] = "%s: %s" % (type(exc).__name__, exc)
+    out["hm_visible_restored"] = [bool(x and x in w._minis and w._minis[x].isVisible())
+                                  for x in (ha, hb)]
+    out["hm_recycled_after_show"] = list(w._recycled_minis)
+    _drop_two(ha, hb)
+
+    # 空着 / 没有数据层时不许抛
+    out["hm_empty_error"] = ""
+    try:
+        w._minis.clear()
+        w._hidden_minis = []
+        w._recycled_minis = []
+        w._tray_hide_minis()
+        w._tray_hide_minis()
+    except Exception as exc:               # noqa: BLE001
+        out["hm_empty_error"] = "%s: %s" % (type(exc).__name__, exc)
+
+    out["hm_nomb_error"] = ""
+    real_mb = U.MB
+    try:
+        U.MB = None
+        w._tray_hide_minis()
+        w._sync_mini_btn()
+        out["hm_nomb_tip"] = getattr(w, "_mini_tip", None)
+    except Exception as exc:               # noqa: BLE001
+        out["hm_nomb_error"] = "%s: %s" % (type(exc).__name__, exc)
+    finally:
+        U.MB = real_mb
+
     U.TRAY = real_tray_mod
     U.GlassDialog = real_dialog
     print(PROBE_PREFIX + json.dumps(out, ensure_ascii=False))
@@ -860,7 +985,7 @@ class Ui210Test(unittest.TestCase):
     def test_01_offscreen_and_version(self):
         d = self.data
         self.check("子进程跑在 offscreen", d.get("platform") == "offscreen", d.get("platform"))
-        self.check("VERSION == 2.2.0", d.get("version") == "2.2.0", d.get("version"))
+        self.check("VERSION == 2.2.1", d.get("version") == "2.2.1", d.get("version"))
         self.check("临时 ui.json 生效（不写用户真实状态）",
                    bool(d.get("tmp_ui_json")) and "dsh_ui210_" in str(d.get("tmp_ui_json")),
                    d.get("tmp_ui_json"))
@@ -918,7 +1043,7 @@ class Ui210Test(unittest.TestCase):
         self.check("两行排在「背景」之后",
                    (d.get("rows") or [])[:3] == ["背景", "开机自启动", "最小化到托盘"],
                    d.get("rows"))
-        self.check("版本行还是第一行", (d.get("dialog_lines_head") or [""])[0] == "版本 2.2.0",
+        self.check("版本行还是第一行", (d.get("dialog_lines_head") or [""])[0] == "版本 2.2.1",
                    d.get("dialog_lines_head"))
         self.check("对话框 exec 了一次", d.get("dialog_execd") == 1, d.get("dialog_execd"))
 
@@ -1066,6 +1191,8 @@ class Ui210Test(unittest.TestCase):
         self.check("on_show_all_minis -> MainWindow._tray_show_minis", ident.get("minis") is True,
                    ident)
         self.check("on_settings -> MainWindow._on_settings", ident.get("settings") is True, ident)
+        self.check("on_hide_all_minis -> MainWindow._tray_hide_minis（菜单第 3 项）",
+                   ident.get("hide_minis") is True, ident)
         self.check("on_quit -> MainWindow._tray_quit", ident.get("quit") is True, ident)
 
     def test_12_callbacks_run(self):
@@ -1249,6 +1376,86 @@ class Ui210Test(unittest.TestCase):
                    d.get("mt_c_visible") is True, d.get("mt_c_visible"))
         self.check("回归：用户关掉的那个不会被开回来",
                    d.get("mt_c_b_not_restored") is True, d.get("mt_c_b_not_restored"))
+
+    # --------------------------------------------------- 托盘「隐藏全部小窗口」
+    def test_23_hide_all_minis_hides_without_closing(self):
+        """菜单第 3 项：只 hide() 不 close()，账本 open 一个字不动，记进 _hidden_minis。"""
+        d = self.data
+        self.check("造两个小窗口没抛", d.get("hm_spawn_error") == "", d.get("hm_spawn_error"))
+        self.check("两个小窗口都露着", d.get("hm_visible_before") == [True, True],
+                   d.get("hm_visible_before"))
+        self.check("隐藏前账本 open 都是 True", d.get("hm_open_before") == [True, True],
+                   d.get("hm_open_before"))
+        self.check("_tray_hide_minis() 没抛", d.get("hm_error") == "", d.get("hm_error"))
+        self.check("两个小窗口都不可见了", d.get("hm_visible_after") == [False, False],
+                   d.get("hm_visible_after"))
+        self.check("账本 open 仍是 True（没被写成关闭）",
+                   d.get("hm_open_after") == [True, True], d.get("hm_open_after"))
+        self.check("两个都还在 open_ids 里（下次开机照样回来）",
+                   d.get("hm_open_ids_has_a") is True and d.get("hm_open_ids_has_b") is True,
+                   (d.get("hm_open_ids_has_a"), d.get("hm_open_ids_has_b")))
+        self.check("minis.json 一个字节都没变", d.get("hm_ledger_bytes_same") is True,
+                   d.get("hm_ledger_bytes_same"))
+        self.check("_recycled_minis 收录了这两个 wid", d.get("hm_recycled_has_both") is True,
+                   d.get("hm_recycled_minis"))
+        self.check("_hidden_minis 保持空（不跟主面板收起那套混账）",
+                   d.get("hm_hidden_minis_stays_empty") is True,
+                   d.get("hm_hidden_minis_after_hide"))
+        self.check("工具提示不再报假数（露着 0 个）",
+                   (d.get("hm_tip_after_hide") or "").find("开着") < 0,
+                   d.get("hm_tip_after_hide"))
+
+    def test_24_hide_all_minis_is_idempotent(self):
+        d = self.data
+        self.check("对着已经藏着的再收一次不抛", d.get("hm_again_error") == "",
+                   d.get("hm_again_error"))
+        self.check("已经隐藏的不重复记（还是 2 个）",
+                   d.get("hm_recycled_count_after_twice") == 2,
+                   d.get("hm_recycled_after_twice"))
+        self.check("_recycled_minis 里没有重复 wid",
+                   d.get("hm_recycled_no_dup") is True, d.get("hm_recycled_after_twice"))
+        self.check("再收一次仍然不可见", d.get("hm_visible_after_twice") == [False, False],
+                   d.get("hm_visible_after_twice"))
+
+    def test_25_show_all_minis_restores_hidden(self):
+        d = self.data
+        self.check("「显示全部小窗口」没抛", d.get("hm_show_error") == "",
+                   d.get("hm_show_error"))
+        self.check("两个小窗口都回来了", d.get("hm_visible_restored") == [True, True],
+                   d.get("hm_visible_restored"))
+        self.check("_recycled_minis 清空", d.get("hm_recycled_after_show") == [],
+                   d.get("hm_recycled_after_show"))
+
+    def test_27_recycled_survives_panel_reshow(self):
+        """回收状态必须扛住「主面板 hide() -> show()」。
+
+        这条是钉住两套状态分开的：要是把回收 wid 记进 _hidden_minis，
+        showEvent -> _resume_minis 会把它们全弹回来，这里就会红。
+        """
+        d = self.data
+        self.check("主面板 hide/show 没抛", d.get("hm_reshow_error") == "",
+                   d.get("hm_reshow_error"))
+        self.check("主面板收起来再放出来，被回收的小窗口仍然不可见",
+                   d.get("hm_visible_after_reshow") == [False, False],
+                   d.get("hm_visible_after_reshow"))
+        self.check("_recycled_minis 里这两个 wid 还在",
+                   d.get("hm_recycled_survives_reshow") is True,
+                   d.get("hm_recycled_after_reshow"))
+        self.check("主面板 showEvent 没有把它们写进 _hidden_minis",
+                   d.get("hm_hidden_after_reshow") == [],
+                   d.get("hm_hidden_after_reshow"))
+        self.check("之后点「显示全部小窗口」仍然能把它们放出来",
+                   d.get("hm_visible_restored") == [True, True],
+                   d.get("hm_visible_restored"))
+
+    def test_26_hide_all_minis_degrades(self):
+        d = self.data
+        self.check("_minis 为空时 _tray_hide_minis() 不抛", d.get("hm_empty_error") == "",
+                   d.get("hm_empty_error"))
+        self.check("MB 为 None 时 _tray_hide_minis()/_sync_mini_btn() 不抛",
+                   d.get("hm_nomb_error") == "", d.get("hm_nomb_error"))
+        self.check('MB 缺失时降级文案仍是「数据层未就绪」',
+                   d.get("hm_nomb_tip") == "数据层未就绪", d.get("hm_nomb_tip"))
 
     # ------------------------------------------------------------ 小窗口任务栏
     def test_16_mini_window_stays_off_taskbar(self):

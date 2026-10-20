@@ -140,10 +140,14 @@ dst = ROOT / <该 group 的目录名> / name
     # deskbox/tray.py —— 通知区图标
     class Tray(QSystemTrayIcon):
         __init__(self, parent, icon, on_toggle_panel=None, on_show_panel=None,
-                 on_show_all_minis=None, on_settings=None, on_quit=None)
+                 on_show_all_minis=None, on_settings=None, on_quit=None,
+                 on_tb_mode=None, tb_mode=None, on_hide_all_minis=None)
         available() -> bool          # 系统有没有通知区
         show() / hide() / is_visible() -> bool / set_icon(icon)
-    # 菜单四项固定顺序：显示主面板(-> on_show_panel，只显不隐) / 显示全部小窗口 / 设置 / 退出
+    # 菜单六项固定顺序：显示主面板(-> on_show_panel，只显不隐) / 显示全部小窗口(-> on_show_all_minis)
+    #   / 隐藏全部小窗口(-> on_hide_all_minis，只 hide 不 close、不写 minis.json) / 任务栏透明 ▸ 子菜单
+    #   (-> on_tb_mode，三档磨砂/透明/关，默认关) / 设置(-> on_settings) / 退出(-> on_quit)
+    # 回调按中文文案 key 取，不用下标 —— 往后插项也不会错位
     # 左键 Trigger -> on_toggle_panel（可见就收，不可见就放）
 
     # deskbox/appicon.py —— 程序图标
