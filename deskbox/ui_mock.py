@@ -66,6 +66,7 @@ MB, _MB_ERR = _rel("minibox")          # 小窗口清单（minis.json）；缺�
 AUTO, _AUTO_ERR = _rel("autostart")    # 开机自启动（HKCU 的 Run 键）
 TRAY, _TRAY_ERR = _rel("tray")         # 系统托盘图标（通知区）
 APPICON, _APPICON_ERR = _rel("appicon")   # 程序图标（窗口 / 托盘，自带降级画法）
+TBFX, _TBFX_ERR = _rel("taskbarfx")    # 任务栏透明（纯 ctypes，缺失则整行降级）
 
 ACCENT = QColor("#0A84FF")
 FAMILY = "Microsoft YaHei UI"
@@ -75,7 +76,7 @@ RADIUS = 16
 # 五处（背景 / 开机自启动 / 最小化到托盘 / 点关闭 / 小窗口自动粘连）都引用这两个常量。
 _CHIP_W = 89
 _CHIP_H = 30
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 # 截图 / 自动化时压制启动自检弹窗（--shot 会自动打开）
 NO_HIDE_PROMPT = False
 
@@ -109,6 +110,24 @@ def _tray_ok(tray):
         return bool(fn())
     except Exception:                  # noqa: BLE001
         return False
+
+
+def _release_tb():
+    """程序退出（任何一条路径）时把任务栏还原成系统默认。
+
+    任务栏外观是**系统级**状态：盒子走了却把它留在透明态，等于在用户桌面上留下
+    一个没人负责的改动。所以正常退出一定还原；崩溃时这条走不到，由压缩包里的
+    ResetTaskbar.exe 兜底。
+    """
+    if TBFX is None:
+        return
+    fn = getattr(TBFX, "release", None)
+    if not callable(fn):
+        return
+    try:
+        fn()
+    except Exception:                  # noqa: BLE001 —— 退出路径上绝不能抛
+        pass
 
 
 def _unavail_note(row, why):
@@ -157,6 +176,7 @@ SYS_CAT_FALLBACK = "系统应用"
 DEFAULT_STATE = {"x": 70, "y": 60, "w": 1120, "h": 680,
                  "density": 58, "pinned": False, "icon_idx": 1, "bg": "clear",
                  "solid": "#20222c", "snap": True, "tray": True, "close_tray": True,
+                 "tb_mode": "off",   # 任务栏外观：blur 磨砂 / clear 透明 / off 关（默认关）
                  "removed": [], "gone": [],
                  "order": {},      # 界面顺序：scope -> [路径...]，纯显示用，不进账本
                  "hide_warned": False, "hide_quiet": False,
@@ -169,6 +189,13 @@ DEFAULT_STATE = {"x": 70, "y": 60, "w": 1120, "h": 680,
 BG_MODES = tuple(glass.MODES)
 # 旧版本的 "wall"（透壁纸）已下线，读到一律迁移成 "frost"
 BG_LEGACY = {"wall": "frost"}
+
+# ── 任务栏外观（taskbarfx）─────────────────────────────────────────
+# 三档，顺序固定，与托盘子菜单、设置行共用这一份。taskbarfx 缺失时本模块仍要能跑：
+# 下面这份是**本地兜底副本**，写得跟 taskbarfx.MODES 一样，不依赖它 import 成功。
+TB_MODES = ("blur", "clear", "off")
+TB_LABELS = ("磨砂", "透明", "关")
+TB_DEFAULT = "off"                 # 默认档位：关（用户定的，不自作主张开）
 
 
 def bg_mode():
@@ -304,6 +331,8 @@ def _load_state():
         st["tray"] = raw["tray"]
     if isinstance(raw.get("close_tray"), bool):  # 点关闭：收进托盘 / 退出
         st["close_tray"] = raw["close_tray"]
+    if raw.get("tb_mode") in TB_MODES:           # 任务栏外观：旧文件没有 / 坏值一律留 "off"
+        st["tb_mode"] = raw["tb_mode"]
     _sv = raw.get("solid")
     if isinstance(_sv, str) and QColor(_sv).isValid():
         st["solid"] = _sv
@@ -2356,6 +2385,10 @@ class MainWindow(QWidget):
         self._snap_on = bool(self._state.get("snap", True))   # 小窗口自动粘连
         self._tray_on = bool(self._state.get("tray", True))   # 最小化到托盘
         self._close_tray = bool(self._state.get("close_tray", True))  # 点关闭：收进托盘
+        # 任务栏外观的当前档位。只记**用户想要的**档位；真正下发到系统是 _apply_tb 的事，
+        # 这里不碰任何 Win32 —— 构造期间改系统外观会让人在启动瞬间看见任务栏闪一下。
+        _tbv = self._state.get("tb_mode")
+        self._tb_mode = _tbv if _tbv in TB_MODES else TB_DEFAULT
         self._removed = {_nk(p) for p in (self._state.get("removed") or [])}
         self._gone = {_nk(p) for p in (self._state.get("gone") or [])}
         self.removed_rows = []             # 「已移除」档里的条目（从常规视图摘出去的那些）
@@ -2474,6 +2507,97 @@ class MainWindow(QWidget):
         """「点关闭」是否收进托盘（默认 True）。设置面板与 closeEvent 共用这一处。"""
         return bool(getattr(self, "_close_tray", True))
 
+    # ---------- 任务栏外观 ----------
+    def _tb_supported(self):
+        """这一行到底能不能用：taskbarfx 在 + 本机支持（真 Windows + 找得到任务栏）。"""
+        if TBFX is None:
+            return False
+        fn = getattr(TBFX, "is_supported", None)
+        if not callable(fn):
+            return False
+        try:
+            return bool(fn())
+        except Exception:              # noqa: BLE001
+            return False
+
+    def _tb_peer_hint(self):
+        """检测到 TranslucentTB 时的一句提示；没有就空串。"""
+        if TBFX is None:
+            return ""
+        fn = getattr(TBFX, "peer_hint", None)
+        if not callable(fn):
+            return ""
+        try:
+            return str(fn() or "")
+        except Exception:              # noqa: BLE001
+            return ""
+
+    def _on_tb_from_tray(self, mode):
+        """托盘子菜单点了某一档：下发；失败就把勾选拨回**实际生效**的那一档。
+
+        托盘自己已经按用户点的把勾挪过去了（QActionGroup 排他），所以这里没生效时
+        必须显式 set_tb_mode 拨回来，否则菜单会显示一个假的当前档位。
+        """
+        if self._apply_tb(mode):
+            return
+        t = getattr(self, "_tray", None)
+        setter = getattr(t, "set_tb_mode", None)
+        if callable(setter):
+            try:
+                setter(getattr(self, "_tb_mode", TB_DEFAULT))
+            except Exception:          # noqa: BLE001
+                pass
+
+    def _restore_tb(self):
+        """启动时把任务栏对齐到 ui.json 里记的档位。
+
+        即使档位是「关」也要下发一次 state=0：上次万一被强杀，系统可能还留在
+        透明态，这一次写正好把残留抹掉 —— 崩溃自愈靠的就是这一条（再加上
+        ResetTaskbar.exe 给「盒子根本没起来」的情况兜底）。
+        """
+        if not self._tb_supported():
+            return False
+        return self._apply_tb(getattr(self, "_tb_mode", TB_DEFAULT), quiet=True)
+
+    def _sync_tray_tb(self):
+        """把当前档位同步到托盘子菜单的勾选（设置面板改档后调；没托盘就跳过）。"""
+        t = getattr(self, "_tray", None)
+        setter = getattr(t, "set_tb_mode", None)
+        if not callable(setter):
+            return
+        try:
+            setter(getattr(self, "_tb_mode", TB_DEFAULT))
+        except Exception:              # noqa: BLE001
+            pass
+
+    def _apply_tb(self, mode=None, quiet=False):
+        """把任务栏切到 mode（默认当前档位）；成功才落进 self._tb_mode 并排队存盘。
+
+        设置行、托盘子菜单、启动恢复三条线都走这里 —— 只有这一处会去碰系统。
+        taskbarfx 缺失 / 下发失败时**不改** self._tb_mode：界面上的档位与实际
+        必须一致，不能出现「显示磨砂、其实没生效」。
+        """
+        want = mode if mode in TB_MODES else getattr(self, "_tb_mode", TB_DEFAULT)
+        if TBFX is None:
+            if not quiet:
+                self._flash("任务栏外观模块不可用：%s" % (_TBFX_ERR or "导入失败"))
+            return False
+        try:
+            ok = bool(TBFX.apply(want))
+        except Exception as exc:       # noqa: BLE001
+            if not quiet:
+                self._flash("任务栏切换失败：%s" % exc)
+            return False
+        if ok:
+            self._tb_mode = want
+            self._queue_save()
+            hint = self._tb_peer_hint()
+            if hint and not quiet:
+                self._flash(hint)
+        elif not quiet:
+            self._flash("任务栏切换没生效（可能被另一个程序占用）")
+        return ok
+
     def _on_min_click(self):
         """黄点被点：收进托盘返回 True，没接手返回 False（调用方照旧 showMinimized）。
 
@@ -2507,11 +2631,21 @@ class MainWindow(QWidget):
                 on_show_panel=self._tray_show,
                 on_show_all_minis=self._tray_show_minis,
                 on_settings=self._on_settings,
-                on_quit=self._tray_quit)
+                on_quit=self._tray_quit,
+                on_tb_mode=self._on_tb_from_tray,   # 托盘里点了某一档
+                tb_mode=getattr(self, "_tb_mode", TB_DEFAULT))
         except Exception:              # noqa: BLE001 —— 模块在但起不来
             self._tray = None
             return None
         self._tray = t                 # 无论显不显，引用先留住
+        # 任务栏外观不支持时把子菜单整项禁掉（菜单还是留着，灰着比消失好懂）
+        if not self._tb_supported():
+            setter = getattr(t, "set_tb_enabled", None)
+            if callable(setter):
+                try:
+                    setter(False, "当前系统不支持改任务栏外观")
+                except Exception:      # noqa: BLE001
+                    pass
         try:
             if not _tray_ok(t):
                 return None            # 没通知区：不 show，也不假装有托盘
@@ -2776,6 +2910,7 @@ class MainWindow(QWidget):
                 "snap": bool(self._snap_on),
                 "tray": bool(self._tray_on),
                 "close_tray": bool(self._close_tray),
+                "tb_mode": str(getattr(self, "_tb_mode", TB_DEFAULT)),
                 "removed": sorted(self._removed),
                 "gone": sorted(self._gone),
                 "order": {str(k): list(v) for k, v in
@@ -4490,6 +4625,48 @@ class MainWindow(QWidget):
         srow.addWidget(seg_sn)
         bgh.addLayout(srow)
 
+        # 任务栏透明：磨砂 / 透明 / 关（默认关，用户自己开）。
+        # 这一行是**唯一**会改系统任务栏外观的入口之一（另一个是托盘子菜单），
+        # 两处都走 self._apply_tb，所以档位真相只有 self._tb_mode 一份。
+        lbtb = QLabel("任务栏透明")
+        lbtb.setFont(fb)
+        lbtb.setFixedSize(_CHIP_W, _CHIP_H)
+        lbtb.setAlignment(Qt.AlignCenter)
+        _theme(lbtb, lambda m: "color:%s;background:%s;border-radius:9px;"
+               % (glass.inkcss(150, m), glass.panelcss(32, m)))
+        tbrow = QHBoxLayout()
+        tbrow.setContentsMargins(0, 0, 0, 0)
+        tbrow.setSpacing(8)
+        tbrow.addWidget(lbtb)
+        tbrow.addStretch(1)
+        if not self._tb_supported():
+            why = ("taskbarfx 模块不可用：%s" % (_TBFX_ERR or "导入失败")
+                   if TBFX is None else "当前系统不支持改任务栏外观（需要 Windows 10 经典任务栏）")
+            lbtb.setToolTip(why)
+            _unavail_note(tbrow, why)
+        else:
+            seg_tb = Segmented(list(TB_LABELS), seg_w=44)   # 磨砂 / 透明 / 关
+            _cur = getattr(self, "_tb_mode", TB_DEFAULT)
+            seg_tb.index = TB_MODES.index(_cur) if _cur in TB_MODES else len(TB_MODES) - 1
+            seg_tb.setToolTip("磨砂：模糊壁纸 + 深色纱；透明：壁纸直接透出；"
+                              "关：恢复系统默认。只改外观，不动任何文件")
+
+            def _on_tb(i):
+                want = TB_MODES[i] if 0 <= i < len(TB_MODES) else TB_DEFAULT
+                if self._apply_tb(want):
+                    self._sync_tray_tb()          # 托盘子菜单的勾跟着走
+                    seg_tb.index = TB_MODES.index(
+                        getattr(self, "_tb_mode", TB_DEFAULT))
+                else:
+                    # 没生效：把格子拨回**实际**档位，别让界面说谎
+                    seg_tb.index = TB_MODES.index(
+                        getattr(self, "_tb_mode", TB_DEFAULT))
+                seg_tb.update()
+
+            seg_tb._cb = _on_tb
+            tbrow.addWidget(seg_tb)
+        bgh.addLayout(tbrow)
+
         box, vb = d.add_box(13, 13, 18, 18, 6)
         lb = QLabel("分组存放位置")
         f = QFont(FAMILY)
@@ -4691,6 +4868,10 @@ def main():
         NO_HIDE_PROMPT = True          # 自动化出图不弹启动自检
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)   # 关主面板不等于退出程序（还有小窗口）
+    # 退出时把任务栏还原成系统默认。挂在 aboutToQuit 上而不是 closeEvent：
+    # 托盘退出 / 关主面板 / app.quit() 三条路都会走到这里，只要漏一处就会
+    # 在用户桌面上留一个没人负责的透明任务栏。
+    app.aboutToQuit.connect(_release_tb)
     app.setFont(QFont(FAMILY, 9))
     if APPICON is not None:
         try:
@@ -4713,6 +4894,7 @@ def main():
         w.sld.setValue(100 - w._density)     # 滑块是透明度，反向取值
         w.sld.blockSignals(False)
     w._setup_tray()                        # 系统托盘；模块缺失 / 无通知区安静跳过
+    w._restore_tb()                        # 把任务栏对齐到上次的档位（顺带抹掉强杀残留）
     w.show()
     if "--shot" in sys.argv:
         out = sys.argv[sys.argv.index("--shot") + 1]

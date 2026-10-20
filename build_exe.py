@@ -61,11 +61,18 @@
            Failed to deserialize VSVersionInfo；
         2. 中文照字面量写就行，别手写十六进制转义 —— 文件按 UTF-8 落盘即可，
            PyInstaller 用 tokenize.detect_encoding 认编码，没有 BOM 也认 UTF-8。
-      版本号跟 deskbox/ui_mock.py:73 的 VERSION 对齐（2.1.0 → 2.1.0.0）。
+      版本号跟 deskbox/ui_mock.py:79 的 VERSION 对齐（2.2.0 → 2.2.0.0）。
 
 不写死的：distpath/workpath/specpath 都锚在仓库根，跟当前 cwd 无关。
 
-产物：dist\\Tomato Desktop Box.exe；脚本最后会打印它的绝对路径与字节数。
+产物（两个，都是 dist\\ 下的单文件）：
+  dist\\Tomato Desktop Box.exe   主程序
+  dist\\ResetTaskbar.exe         兜底：双击把任务栏还原成系统默认（见下）
+
+ResetTaskbar 为什么也要打 exe：盒子要是被任务管理器强杀，来不及把任务栏外观还原，
+任务栏就会一直停在透明 / 磨砂。那个兜底程序必须是「用户慌的时候双击一下就能用」的东西，
+不能要求装 Python、不能要求先跑起来盒子。它只 import ctypes / os / sys，
+所以打出来只有十几 MB，且用同样的 --noconsole（靠 MessageBoxW 弹框给反馈，不是黑框）。
 """
 import hashlib
 import os
@@ -77,6 +84,11 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 
 NAME = "Tomato Desktop Box"                 # exe 文件名（含空格，跑起来要有引号）
 ENTRY = os.path.join(ROOT, "DeskBox.pyw")   # 入口：跟双击 .pyw 时同一个脚本
+
+# 兜底程序：任务栏被盒子留在透明/磨砂状态时，双击它还原。单独一个 exe，
+# 构建方式一样，只是入口换成 ResetTaskbar.py、不带图标也不带 deskbox 数据。
+RESET_NAME = "ResetTaskbar"
+RESET_ENTRY = os.path.join(ROOT, "ResetTaskbar.py")
 DESKBOX_SRC = os.path.join(ROOT, "deskbox")
 ICON = os.path.join(ROOT, "assets", "tomato.ico")
 
@@ -105,10 +117,11 @@ LOG = os.path.join(WORK, "pyinstaller.log")
 
 # 版本资源：任务管理器「启动」页的「发布者」列读的就是 CompanyName，不写就是空白。
 # 生成到 build/ 里（构建产物，不进仓库），由 --version-file 交给 PyInstaller。
-VERSION = "2.1.0"                       # 跟 deskbox/ui_mock.py:73 的 VERSION 对齐
+VERSION = "2.2.0"                       # 跟 deskbox/ui_mock.py:79 的 VERSION 对齐
 PUBLISHER = "番茄炒蛋"                   # CompanyName → 任务管理器里的「发布者」
 DESC = "Tomato Desktop Box 桌面图标收纳"  # FileDescription → 属性对话框里那份描述
 VERFILE = os.path.join(WORK, "version_info.txt")
+RESET_VERFILE = os.path.join(WORK, "version_info_reset.txt")   # 兜底程序单独一份（名字要对）
 
 # 版本资源文件的内容模板（% 占位，见 _write_version_file）。
 # 语言/代码页用 Windows 那边最通行的 040904B0 + Translation [1033, 1200]：
@@ -177,7 +190,9 @@ def _fingerprint(stage):
     return h.hexdigest()[:16]
 
 
-def _write_version_file():
+def _write_version_file(name=NAME, desc=DESC, path=VERFILE):
+    """参数化是因为兜底程序也要自己的版本资源：OriginalFilename 必须对得上，
+    否则属性对话框里两个 exe 都自称 Tomato Desktop Box.exe。"""
     """生成 exe 的版本资源文件（build/version_info.txt），返回它的路径。
 
     为什么非得有这个文件：任务管理器「启动」页有一列「发布者」= exe 版本资源里的
@@ -192,16 +207,16 @@ def _write_version_file():
     """
     parts = (VERSION.split(".") + ["0", "0"])[:4]
     text = VERSION_TEMPLATE % {
-        "v4": ", ".join(parts),          # FixedFileInfo 要的 4 段数字：2, 1, 0, 0
-        "ver": ".".join(parts),          # 字符串型的 4 段：2.1.0.0
+        "v4": ", ".join(parts),          # FixedFileInfo 要的 4 段数字：2, 2, 0, 0
+        "ver": ".".join(parts),          # 字符串型的 4 段：2.2.0.0
         "pub": PUBLISHER,
-        "desc": DESC,
-        "name": NAME,
+        "desc": desc,
+        "name": name,
     }
     os.makedirs(WORK, exist_ok=True)
-    with open(VERFILE, "w", encoding="utf-8", newline="\n") as fp:
+    with open(path, "w", encoding="utf-8", newline="\n") as fp:
         fp.write(text)
-    return VERFILE
+    return path
 
 
 def _pyinstaller_args(stage):
@@ -231,6 +246,34 @@ def _pyinstaller_args(stage):
         "--specpath", WORK,
         "--noconfirm",
         ENTRY,
+    ]
+
+
+def _reset_args():
+    """兜底程序的 PyInstaller 命令行。
+
+    跟主程序的区别只有三条，每条都有理由：
+      * 不带 --icon / --add-data assets：它不画界面，用不到番茄图标；
+      * 不带 --add-data deskbox：ResetTaskbar.py 是 import deskbox.taskbarfx 直接
+        吃源码模块的，--paths 指到仓库根 + hidden-import 点名就够，不需要把整个
+        deskbox/ 当数据再发一份（那样只会平白胖几 MB）；
+      * 同样 --noconsole：双击不能弹黑框。它的反馈走 MessageBoxW，
+        见 ResetTaskbar.py 的 _alert()。
+    """
+    return [
+        sys.executable, "-m", "PyInstaller",
+        "--noconsole",
+        "--onefile",
+        "--name", RESET_NAME,
+        "--version-file", RESET_VERFILE,
+        "--paths", ROOT,
+        "--hidden-import", "deskbox.taskbarfx",
+        "--hidden-import", "ctypes.wintypes",
+        "--distpath", DIST,
+        "--workpath", WORK,
+        "--specpath", WORK,
+        "--noconfirm",
+        RESET_ENTRY,
     ]
 
 
@@ -344,6 +387,7 @@ def main(argv):
         shutil.rmtree(WORK, ignore_errors=True)
 
     for path, what in ((ENTRY, "入口脚本"), (ICON, "图标文件"),
+                       (RESET_ENTRY, "兜底程序脚本"),
                        (DESKBOX_SRC, "deskbox 目录")):
         if not os.path.exists(path):
             _fail("%s不存在：%s" % (what, path))
@@ -395,6 +439,25 @@ def main(argv):
     print("")
     print("[build_exe] exe 绝对路径：%s" % exe)
     print("[build_exe] exe 字节数：%d（%.1f MiB）" % (size, size / 1048576.0))
+
+    # ---- 兜底程序：任务栏还原 ----------------
+    print("")
+    print("[build_exe] ===== 兜底程序 %s.exe =====" % RESET_NAME)
+    _write_version_file(name=RESET_NAME,
+                        desc="Tomato Desktop Box 任务栏还原工具",
+                        path=RESET_VERFILE)
+    rargs = _reset_args()
+    print("[build_exe] 命令：%s" % " ".join(
+        '"%s"' % a if " " in a else a for a in rargs[1:]))
+    rcode, rtail = _run(rargs)
+    if rcode != 0:
+        _fail("兜底程序 PyInstaller 退出码 %d（看 %s）" % (rcode, LOG))
+    rexe = os.path.join(DIST, RESET_NAME + ".exe")
+    if not os.path.isfile(rexe):
+        _fail("兜底程序构建报了成功但找不到产物：%s" % rexe)
+    rsize = os.path.getsize(rexe)
+    print("[build_exe] %s 绝对路径：%s" % (RESET_NAME, rexe))
+    print("[build_exe] %s 字节数：%d（%.1f MiB）" % (RESET_NAME, rsize, rsize / 1048576.0))
     return 0
 
 

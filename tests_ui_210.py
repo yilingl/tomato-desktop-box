@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""ui_mock.py 2.1.0 接线自测：版本号 / 托盘开关 / 黄点 / 设置面板两行 / 托盘五回调。
+"""ui_mock.py 2.1.0 接线自测（现覆盖 2.2.0 任务栏透明行）：版本号 / 托盘开关 / 黄点 / 设置面板 / 托盘回调。
 
 为什么走子进程：QT_QPA_PLATFORM=offscreen 必须在 import PySide6 之前设进环境。
     跑 unittest discover 时同进程里可能已经有 windows 平台的 QApplication，
@@ -230,6 +230,95 @@ def _probe():
     out["seg_tray_labels"] = list(seg_tray.labels) if seg_tray is not None else None
     out["seg_auto_index_live_off"] = seg_auto.index if seg_auto is not None else None
 
+    # ------------------------------------------------ 任务栏透明行（2.2.0 新增）
+    out["default_tb_mode"] = U.DEFAULT_STATE.get("tb_mode")
+    out["panel_tb_mode_initial"] = getattr(w, "_tb_mode", None)
+    out["state_now_tb_mode"] = w._state_now().get("tb_mode")
+    seg_tb = rows.get("任务栏透明")
+    out["has_tb_row"] = "任务栏透明" in rows
+    out["tb_row_is_last"] = bool(out["rows"]) and out["rows"][-1] == "任务栏透明"
+    out["seg_tb_none"] = seg_tb is None
+    out["seg_tb_labels"] = list(seg_tb.labels) if seg_tb is not None else None
+    out["seg_tb_index_default"] = seg_tb.index if seg_tb is not None else None
+
+    # 换成假 taskbarfx：绝不让设置面板真的去改系统任务栏
+    class FakeTbFx(object):
+        MODES = ("blur", "clear", "off")
+
+        def __init__(self, ok=True):
+            self.ok = ok
+            self.calls = []
+            self.cur = "off"
+
+        def is_supported(self):
+            return True
+
+        def peer_running(self):
+            return False
+
+        def peer_hint(self):
+            return "检测到 TranslucentTB，两个程序会互相覆盖"
+
+        def current(self):
+            return self.cur
+
+        def apply(self, mode):
+            self.calls.append(mode)
+            if self.ok and mode in self.MODES:
+                self.cur = mode
+                return True
+            return False
+
+        def release(self):
+            self.calls.append("release")
+            self.cur = "off"
+            return True
+
+    if seg_tb is not None:
+        real_tbfx = U.TBFX
+        fake_tb = FakeTbFx(True)
+        U.TBFX = fake_tb
+        fake_tb.calls = []
+        flashes[:] = []
+        seg_tb._cb(0)                         # 点「磨砂」
+        out["tb_calls_after_blur"] = list(fake_tb.calls)
+        out["tb_mode_after_blur"] = getattr(w, "_tb_mode", None)
+        out["tb_index_after_blur"] = seg_tb.index
+        out["tb_state_now_after_blur"] = w._state_now().get("tb_mode")
+        out["tb_flash_after_blur"] = list(flashes)   # 有 TTB 时该给一句提示
+
+        fake_tb.calls = []
+        flashes[:] = []
+        seg_tb._cb(1)                         # 点「透明」
+        out["tb_calls_after_clear"] = list(fake_tb.calls)
+        out["tb_index_after_clear"] = seg_tb.index
+
+        # 下发失败：档位与格子都必须拨回**实际**值，不许显示假的
+        fake_tb.calls = []
+        flashes[:] = []
+        fake_tb.ok = False
+        seg_tb._cb(2)                         # 想切「关」但后端说不行
+        out["tb_calls_after_fail"] = list(fake_tb.calls)
+        out["tb_mode_after_fail"] = getattr(w, "_tb_mode", None)
+        out["tb_index_after_fail"] = seg_tb.index
+        out["tb_flash_after_fail"] = list(flashes)
+
+        # 启动对齐：即使档位是「关」也要下发一次（抹掉上次强杀的残留）
+        fake_tb.ok = True
+        fake_tb.calls = []
+        w._tb_mode = "off"
+        out["restore_ret"] = bool(w._restore_tb())
+        out["restore_calls"] = list(fake_tb.calls)
+
+        # 模块整个缺失：整行降级成灰字，不摆一个看着能用的开关
+        U.TBFX = None
+        w._on_settings()
+        dlg_na = FakeDialog.made[-1] if FakeDialog.made else None
+        rows_na = dict(rows_of(dlg_na.boxes[0][1])) if (dlg_na and dlg_na.boxes) else {}
+        out["tb_row_na_present"] = "任务栏透明" in rows_na
+        out["tb_row_na_no_seg"] = rows_na.get("任务栏透明") is None
+        U.TBFX = real_tbfx
+
     # ---------------------------------------------------------- 自启动开关
     if seg_auto is not None:
         fake_auto.calls = []
@@ -295,15 +384,20 @@ def _probe():
             outer = self
 
             class _Tray(object):
+                # 末两个参数是 2.2.0 加的「任务栏透明」子菜单接线（真 tray.py 同样追加在
+                # 末尾、都带默认值）；假对象必须跟着收，否则 MainWindow 构造就 TypeError。
                 def __init__(self, parent, icon, on_toggle_panel=None, on_show_panel=None,
-                             on_show_all_minis=None, on_settings=None, on_quit=None):
+                             on_show_all_minis=None, on_settings=None, on_quit=None,
+                             on_tb_mode=None, tb_mode=None):
                     outer.ctor = {"parent": parent, "icon": icon,
                                   "on_toggle_panel": on_toggle_panel,
                                   "on_show_panel": on_show_panel,
                                   "on_show_all_minis": on_show_all_minis,
-                                  "on_settings": on_settings, "on_quit": on_quit}
+                                  "on_settings": on_settings, "on_quit": on_quit,
+                                  "on_tb_mode": on_tb_mode, "tb_mode": tb_mode}
                     self.shown = 0
                     self.hidden = 0
+                    self.tb_mode = tb_mode
 
                 def available(self):
                     return bool(outer.avail)
@@ -340,7 +434,10 @@ def _probe():
         "minis": cb.get("on_show_all_minis") == w._tray_show_minis,
         "settings": cb.get("on_settings") == w._on_settings,
         "quit": cb.get("on_quit") == w._tray_quit,
+        "tb_mode": cb.get("on_tb_mode") == w._on_tb_from_tray,   # 2.2.0 新增
     }
+    out["ctor_tb_mode"] = cb.get("tb_mode")
+    out["panel_tb_mode"] = getattr(w, "_tb_mode", None)
 
     # 五个回调真的能跑一遍
     w.show()
@@ -763,7 +860,7 @@ class Ui210Test(unittest.TestCase):
     def test_01_offscreen_and_version(self):
         d = self.data
         self.check("子进程跑在 offscreen", d.get("platform") == "offscreen", d.get("platform"))
-        self.check("VERSION == 2.1.0", d.get("version") == "2.1.0", d.get("version"))
+        self.check("VERSION == 2.2.0", d.get("version") == "2.2.0", d.get("version"))
         self.check("临时 ui.json 生效（不写用户真实状态）",
                    bool(d.get("tmp_ui_json")) and "dsh_ui210_" in str(d.get("tmp_ui_json")),
                    d.get("tmp_ui_json"))
@@ -821,9 +918,72 @@ class Ui210Test(unittest.TestCase):
         self.check("两行排在「背景」之后",
                    (d.get("rows") or [])[:3] == ["背景", "开机自启动", "最小化到托盘"],
                    d.get("rows"))
-        self.check("版本行还是第一行", (d.get("dialog_lines_head") or [""])[0] == "版本 2.1.0",
+        self.check("版本行还是第一行", (d.get("dialog_lines_head") or [""])[0] == "版本 2.2.0",
                    d.get("dialog_lines_head"))
         self.check("对话框 exec 了一次", d.get("dialog_execd") == 1, d.get("dialog_execd"))
+
+    # ------------------------------------------------ 任务栏透明（2.2.0 新增）
+    def test_06b_tb_default_is_off(self):
+        d = self.data
+        self.check('DEFAULT_STATE 含 "tb_mode" 且默认 "off"',
+                   d.get("default_tb_mode") == "off", d.get("default_tb_mode"))
+        self.check("面板初始化时 _tb_mode 也是 off",
+                   d.get("panel_tb_mode_initial") == "off", d.get("panel_tb_mode_initial"))
+        self.check("_state_now() 带着 tb_mode", d.get("state_now_tb_mode") == "off",
+                   d.get("state_now_tb_mode"))
+
+    def test_06c_tb_row_exists_and_is_last(self):
+        d = self.data
+        self.check("确实有「任务栏透明」行", d.get("has_tb_row") is True, d.get("rows"))
+        self.check("它是最后一行的位置在「小窗口自动粘连」之后",
+                   d.get("rows")[:5] == ["背景", "开机自启动", "最小化到托盘",
+                                         "点关闭", "小窗口自动粘连"], d.get("rows"))
+        self.check("三档文案 == ['磨砂','透明','关']",
+                   d.get("seg_tb_labels") == ["磨砂", "透明", "关"], d.get("seg_tb_labels"))
+        self.check("默认勾第 3 格「关」", d.get("seg_tb_index_default") == 2,
+                   d.get("seg_tb_index_default"))
+
+    def test_06d_tb_click_applies_and_syncs_state(self):
+        d = self.data
+        self.check("点「磨砂」把 blur 下发了一次",
+                   d.get("tb_calls_after_blur") == ["blur"], d.get("tb_calls_after_blur"))
+        self.check("点「磨砂」后 _tb_mode = blur", d.get("tb_mode_after_blur") == "blur",
+                   d.get("tb_mode_after_blur"))
+        self.check("点「磨砂」后格子停在索引 0", d.get("tb_index_after_blur") == 0,
+                   d.get("tb_index_after_blur"))
+        self.check("_state_now() 跟着变", d.get("tb_state_now_after_blur") == "blur",
+                   d.get("tb_state_now_after_blur"))
+        self.check("检测到 TTB 时给了一句提示",
+                   any("TranslucentTB" in str(x) for x in (d.get("tb_flash_after_blur") or [])),
+                   d.get("tb_flash_after_blur"))
+        self.check("点「透明」下发 clear",
+                   d.get("tb_calls_after_clear") == ["clear"], d.get("tb_calls_after_clear"))
+        self.check("点「透明」后格子停在索引 1", d.get("tb_index_after_clear") == 1,
+                   d.get("tb_index_after_clear"))
+
+    def test_06e_tb_failure_rolls_back_display(self):
+        d = self.data
+        self.check("后端说失败时确实调了一次", d.get("tb_calls_after_fail") == ["off"],
+                   d.get("tb_calls_after_fail"))
+        self.check("没生效就不改 _tb_mode（仍是 clear）",
+                   d.get("tb_mode_after_fail") == "clear", d.get("tb_mode_after_fail"))
+        self.check("格子拨回实际档位（索引 1，不是用户点的 2）",
+                   d.get("tb_index_after_fail") == 1, d.get("tb_index_after_fail"))
+        self.check("没生效时给了一句提示", bool(d.get("tb_flash_after_fail")),
+                   d.get("tb_flash_after_fail"))
+
+    def test_06f_tb_restore_on_start_even_when_off(self):
+        d = self.data
+        self.check("_restore_tb() 返回 True", d.get("restore_ret") is True, d.get("restore_ret"))
+        self.check("档位是「关」时也下发了一次 off（抹掉强杀残留）",
+                   d.get("restore_calls") == ["off"], d.get("restore_calls"))
+
+    def test_06g_tb_row_degrades_without_module(self):
+        d = self.data
+        self.check("taskbarfx 缺失时这一行还在", d.get("tb_row_na_present") is True,
+                   d.get("tb_row_na_present"))
+        self.check("taskbarfx 缺失时这一行没有 Segmented（置灰而不是假装能用）",
+                   d.get("tb_row_na_no_seg") is True, d.get("tb_row_na_no_seg"))
 
     def test_07_row_controls_match_existing_style(self):
         d = self.data
@@ -897,6 +1057,11 @@ class Ui210Test(unittest.TestCase):
                    d.get("shown_after_setup"))
         ident = d.get("cb_identities") or {}
         self.check("on_toggle_panel -> MainWindow._tray_toggle", ident.get("toggle") is True, ident)
+        self.check("on_tb_mode -> MainWindow._on_tb_from_tray（2.2.0 新增）",
+                   ident.get("tb_mode") is True, ident)
+        self.check("构造托盘时把当前档位传进去了",
+                   d.get("ctor_tb_mode") == d.get("panel_tb_mode"), 
+                   (d.get("ctor_tb_mode"), d.get("panel_tb_mode")))
         self.check("on_show_panel -> MainWindow._tray_show", ident.get("show") is True, ident)
         self.check("on_show_all_minis -> MainWindow._tray_show_minis", ident.get("minis") is True,
                    ident)
