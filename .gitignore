@@ -1,0 +1,16 @@
+# 验证脚本、截图与临时数据（不进仓库）
+_probe/
+# 参考用的第三方源码（不是本项目的代码）
+_ttb_src/
+# Python 缓存
+__pycache__/
+*.py[cod]
+# 本地备份 / 日志
+*.bak
+*.log
+
+# 打包产物（exe 不进仓库，别人跑 build_exe.py 自己生成）
+build/
+dist/
+*.spec
+*.exe
