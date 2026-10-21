@@ -985,7 +985,7 @@ class Ui210Test(unittest.TestCase):
     def test_01_offscreen_and_version(self):
         d = self.data
         self.check("子进程跑在 offscreen", d.get("platform") == "offscreen", d.get("platform"))
-        self.check("VERSION == 2.2.1", d.get("version") == "2.2.1", d.get("version"))
+        self.check("VERSION == 2.2.2", d.get("version") == "2.2.2", d.get("version"))
         self.check("临时 ui.json 生效（不写用户真实状态）",
                    bool(d.get("tmp_ui_json")) and "dsh_ui210_" in str(d.get("tmp_ui_json")),
                    d.get("tmp_ui_json"))
@@ -1043,7 +1043,7 @@ class Ui210Test(unittest.TestCase):
         self.check("两行排在「背景」之后",
                    (d.get("rows") or [])[:3] == ["背景", "开机自启动", "最小化到托盘"],
                    d.get("rows"))
-        self.check("版本行还是第一行", (d.get("dialog_lines_head") or [""])[0] == "版本 2.2.1",
+        self.check("版本行还是第一行", (d.get("dialog_lines_head") or [""])[0] == "版本 2.2.2",
                    d.get("dialog_lines_head"))
         self.check("对话框 exec 了一次", d.get("dialog_execd") == 1, d.get("dialog_execd"))
 

@@ -61,7 +61,7 @@
            Failed to deserialize VSVersionInfo；
         2. 中文照字面量写就行，别手写十六进制转义 —— 文件按 UTF-8 落盘即可，
            PyInstaller 用 tokenize.detect_encoding 认编码，没有 BOM 也认 UTF-8。
-      版本号跟 deskbox/ui_mock.py:80 的 VERSION 对齐（2.2.1 → 2.2.1.0）。
+      版本号跟 deskbox/ui_mock.py:80 的 VERSION 对齐（2.2.2 → 2.2.2.0）。
 
 不写死的：distpath/workpath/specpath 都锚在仓库根，跟当前 cwd 无关。
 
@@ -122,7 +122,7 @@ LOG = os.path.join(WORK, "pyinstaller.log")
 
 # 版本资源：任务管理器「启动」页的「发布者」列读的就是 CompanyName，不写就是空白。
 # 生成到 build/ 里（构建产物，不进仓库），由 --version-file 交给 PyInstaller。
-VERSION = "2.2.1"                       # 跟 deskbox/ui_mock.py:80 的 VERSION 对齐
+VERSION = "2.2.2"                       # 跟 deskbox/ui_mock.py:80 的 VERSION 对齐
 PUBLISHER = "番茄炒蛋"                   # CompanyName → 任务管理器里的「发布者」
 DESC = "Tomato Desktop Box 桌面图标收纳"  # FileDescription → 属性对话框里那份描述
 VERFILE = os.path.join(WORK, "version_info.txt")

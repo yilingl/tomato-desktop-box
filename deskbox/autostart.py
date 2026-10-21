@@ -48,8 +48,9 @@ def script_path():
 def command():
     """RUN 项的完整命令行，路径含空格 / 中文都不能出错。"""
     if _frozen():
-        # 单文件 exe：只有它自己一段，没有第二个参数
-        return '"%s"' % (sys.executable or "")
+        # 单文件 exe + --tray：开机自启动进来的这一份不弹主面板，直接收进托盘。
+        # 手动双击 exe 不带这个参数，照旧弹面板（命令里的参数是两种入口唯一的区别）。
+        return '"%s" --tray' % (sys.executable or "")
     return '"%s" "%s"' % (pythonw_path(), script_path())
 
 

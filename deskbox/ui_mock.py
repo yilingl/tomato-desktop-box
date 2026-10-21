@@ -77,7 +77,7 @@ RADIUS = 16
 # 五处（背景 / 开机自启动 / 最小化到托盘 / 点关闭 / 小窗口自动粘连）都引用这两个常量。
 _CHIP_W = 89
 _CHIP_H = 30
-VERSION = "2.2.1"
+VERSION = "2.2.2"
 # 截图 / 自动化时压制启动自检弹窗（--shot 会自动打开）
 NO_HIDE_PROMPT = False
 
@@ -1415,7 +1415,10 @@ class MiniWindow(QWidget):
         self.resize(max(int(d.get("w") or 340), 200),
                     max(int(d.get("h") or 280), 160))
         self._reload()
-        self.move(int(d.get("x") or 120), int(d.get("y") or 120))
+        # 账本里 x=0 / y=0 是合法位置（贴屏幕左边 / 上边），所以绝不能写 "or 120"：
+        # 0 是假值，会被顶成 120 —— 表现就是「开机后小窗口自己往右移了一截」。
+        x, y = d.get("x"), d.get("y")
+        self.move(120 if x is None else int(x), 120 if y is None else int(y))
         self._loading = False
         QTimer.singleShot(0, self._hide_from_taskbar)
 
@@ -5037,7 +5040,8 @@ def main():
         w.sld.blockSignals(False)
     w._setup_tray()                        # 系统托盘；模块缺失 / 无通知区安静跳过
     w._restore_tb()                        # 把任务栏对齐到上次的档位（顺带抹掉强杀残留）
-    w.show()
+    if "--tray" not in sys.argv:           # 开机自启动进来的：收紧托盘，不弹面板
+        w.show()                           # （小窗口照常由 _restore_minis 开回来）
     if "--shot" in sys.argv:
         out = sys.argv[sys.argv.index("--shot") + 1]
         if "--dialog" in sys.argv:

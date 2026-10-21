@@ -173,10 +173,11 @@ class AutostartTest(unittest.TestCase):
                        auto.pythonw_path())
             self.check("冻结态 script_path() 就是 exe", auto.script_path() == exe,
                        auto.script_path())
-            self.check("冻结态 command() == '\"C:\\Program Files\\Tomato\\Tomato Desktop Box.exe\"'",
-                       cmd == '"C:\\Program Files\\Tomato\\Tomato Desktop Box.exe"', cmd)
-            self.check("冻结态只有一段带引号的路径（2 个引号、无第二个参数）",
-                       cmd.count('"') == 2, cmd)
+            self.check("冻结态 command() == exe 路径 + --tray（开机进托盘）",
+                       cmd == '"C:\\Program Files\\Tomato\\Tomato Desktop Box.exe" --tray',
+                       cmd)
+            self.check("冻结态仍只有一段带引号的路径（2 个引号），参数在引号外",
+                       cmd.count('"') == 2 and cmd.endswith(" --tray"), cmd)
             self.check("冻结态不带 DeskBox.pyw", "DeskBox.pyw" not in cmd, cmd)
         finally:
             if had_frozen:
@@ -204,8 +205,9 @@ class AutostartTest(unittest.TestCase):
             self.check("冻结态 enable 成功", auto.enable(TEST_VALUE) is True)
             exists, raw = _read_reg(TEST_VALUE)
             print("    [注册表原文·冻结态] %s = %r" % (TEST_VALUE, raw))
-            self.check("注册表里存的就是 exe 一段",
-                       raw == '"C:\\Program Files\\Tomato\\Tomato Desktop Box.exe"', raw)
+            self.check("注册表里存的就是 exe 一段 + --tray",
+                       raw == '"C:\\Program Files\\Tomato\\Tomato Desktop Box.exe" --tray',
+                       raw)
             self.check("冻结态 is_enabled True", auto.is_enabled(TEST_VALUE) is True)
         finally:
             if had_frozen:
@@ -227,6 +229,37 @@ class AutostartTest(unittest.TestCase):
                               '"C:\\old\\pythonw.exe" "C:\\old\\DeskBox.pyw"')
         self.check("路径变了 → is_enabled False",
                    auto.is_enabled(TEST_VALUE) is False)
+
+    def test_tray_flag_is_the_one_the_app_reads(self):
+        """自启动写进去的参数必须真的有人认。
+
+        两边写岔了（这边 --tray、那边 --tray-start）就是静默失效：注册表看着挺好，
+        开机照旧弹面板。所以拿 command() 里那截参数去主程序源码里对一遍。
+        """
+        exe = r"C:\Program Files\Tomato\Tomato Desktop Box.exe"
+        old_exe = sys.executable
+        had_frozen = hasattr(sys, "frozen")
+        old_frozen = getattr(sys, "frozen", None)
+        try:
+            sys.frozen = True
+            sys.executable = exe
+            cmd = auto.command()
+        finally:
+            if had_frozen:
+                sys.frozen = old_frozen
+            else:
+                del sys.frozen
+            sys.executable = old_exe
+        flags = cmd.split('"')[-1].split()
+        self.check("冻结态只多一个 --tray 参数", flags == ["--tray"], cmd)
+        src_path = os.path.join(
+            os.path.dirname(os.path.abspath(auto.__file__)), "ui_mock.py")
+        with open(src_path, encoding="utf-8") as fh:
+            src = fh.read()
+        for f in flags:
+            self.check("主程序里有 '%s in sys.argv' 这道闸" % f,
+                       ('"%s" in sys.argv' % f) in src
+                       or ('"%s" not in sys.argv' % f) in src, f)
 
 
 if __name__ == "__main__":

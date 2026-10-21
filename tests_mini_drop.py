@@ -280,6 +280,27 @@ def _probe():
         w.hide()
     except Exception:                 # noqa: BLE001
         pass
+
+    # ------------------------------------------ 账本里的 x=0 / y=0（贴屏幕边）
+    # 0 是合法坐标，但 0 在 Python 里是假值：写 `d.get("x") or 120` 会把贴边的
+    # 小窗口顶到 120，现象就是「开机后它自己往右移了一截」。
+    out["zero_pos"] = {}
+    try:
+        from deskbox import minibox as MBX
+        MBX.update(old_wid, x=0, y=0)
+        w3 = U.MainWindow()
+        app.processEvents()
+        m3 = w3._minis.get(old_wid)
+        info = MBX.get(old_wid) or {}
+        out["zero_pos"] = {
+            "got": ([m3.frameGeometry().x(), m3.frameGeometry().y()]
+                    if m3 is not None else None),
+            "ledger": [info.get("x"), info.get("y")],
+        }
+        w3.hide()
+    except Exception as exc:          # noqa: BLE001
+        out["zero_pos_error"] = "%s: %s" % (type(exc).__name__, exc)
+
     out["probe_ok"] = True
     print(PREFIX + json.dumps(out, ensure_ascii=False))
 
@@ -402,6 +423,18 @@ class MiniDropTest(unittest.TestCase):
         for it in icons:
             self.assertFalse(it["decoration_none"], it)
             self.assertIs(it["pixmap_null"], False, it)
+
+    def test_08_ledger_zero_position_is_kept(self):
+        """贴屏幕左边 / 上边的小窗口（x=0 / y=0）恢复后必须还在 0。
+
+        回归：`int(d.get("x") or 120)` 把 0 当假值顶成 120 ——
+        现象是「开机后 ai / 游戏 两个贴边的小窗口自己往右移了一截」。
+        """
+        self.assertNotIn("zero_pos_error", self.d, self.d.get("zero_pos_error"))
+        zp = self.d.get("zero_pos") or {}
+        self.assertIsNotNone(zp.get("got"), "账本里的窗口没被恢复出来：%r" % (zp,))
+        self.assertEqual(zp.get("got"), [0, 0], "x=0/y=0 被默认值顶掉了：%r" % (zp,))
+        self.assertEqual(zp.get("ledger"), [0, 0], "位置又被写回账本：%r" % (zp,))
 
 
 if __name__ == "__main__":
